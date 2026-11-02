@@ -1,144 +1,188 @@
 import os
 import time
-import logging
-import gradio as gr
-from google import genai
+import google.genai as genai
 from google.genai import types
+import gradio as gr
 from PIL import Image
 
-logging.basicConfig(level=logging.INFO)
-# โมเดลที่จะลองตามลำดับ; ถ้าตั้ง GEMINI_MODEL ใน Render จะลองตัวนั้นก่อน
-# หากโมเดลใดไม่พบ (404) สำหรับ API Key นี้ จะลองตัวถัดไปให้อัตโนมัติ
-DEFAULT_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash']
-_env_model = os.getenv('GEMINI_MODEL', '').strip()
-MODELS = list(dict.fromkeys(([_env_model] if _env_model else []) + DEFAULT_MODELS))
-PPE_ITEMS = ['ถุงมือ', 'แว่นตานิรภัย', 'เสื้อช็อป', 'สายสะท้อนแสง', 'หน้ากากอนามัย']
+MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
 
-PROMPT = '''คุณเป็น AI ผู้ช่วยตรวจสอบอุปกรณ์ป้องกันส่วนบุคคล (PPE)
+
+def build_config():
+    # ลดเวลา "คิด" ของโมเดล (สาเหตุหลักที่ตอบช้า) และตั้ง timeout ไม่ให้ค้างนาน
+    base = dict(temperature=0.1, http_options=types.HttpOptions(timeout=90_000))
+    try:
+        return types.GenerateContentConfig(
+            thinking_config=types.ThinkingConfig(thinking_level="low"), **base
+        )
+    except Exception:
+        return types.GenerateContentConfig(**base)
+
+
+CONFIG = build_config()
+
+def check_object(image, expected_list, api_key):
+
+    if not api_key:
+        return "กรุณากรอก Gemini API Key ก่อนค่ะ"
+
+    if image is None:
+        return "กรุณาอัปโหลดภาพก่อนค่ะ"
+
+    if not expected_list:
+        return "กรุณาเลือกอุปกรณ์ PPE อย่างน้อย 1 รายการค่ะ"
+
+    try:
+        img = image.convert("RGB")
+        # ย่อภาพก่อนส่ง: ภาพจากมือถือมักใหญ่หลาย MB ทำให้อัปโหลดและประมวลผลช้า
+        img.thumbnail((1024, 1024))
+
+        client = genai.Client(api_key=api_key.strip())
+
+        items_to_check = ", ".join(expected_list)
+
+        prompt = f"""
+คุณเป็น AI ผู้ช่วยตรวจสอบอุปกรณ์ป้องกันส่วนบุคคล (PPE)
 สำหรับห้องปฏิบัติการเคมี
 
 กรุณาวิเคราะห์ภาพที่แนบมาอย่างละเอียด
-โดยตรวจสอบเฉพาะอุปกรณ์ต่อไปนี้: {items}
+โดยตรวจสอบอุปกรณ์ต่อไปนี้: {items_to_check}
 
 ข้อกำหนดในการตรวจสอบ:
+
 1. ถุงมือ
-- ตรวจสอบถุงมือทุกสี เช่น สีขาว น้ำเงิน ม่วง เหลือง ดำ เขียว ชมพู และสีอื่น ๆ
-- ตรวจสอบทั้งถุงมือยางและถุงมือไนไตรล์ และว่ามีการสวมที่มือจริงหรือไม่
+- ตรวจสอบถุงมือทุกสี เช่น สีขาว น้ำเงิน ม่วง
+  เหลือง ดำ เขียว ชมพู และสีอื่น ๆ
+- ตรวจสอบทั้งถุงมือยางและถุงมือไนไตรล์
 - ห้ามตัดสินว่าถุงมือไม่พบเพียงเพราะสีแตกต่างจากสีขาว
+
 2. แว่นตานิรภัย
 - ตรวจสอบแว่นครอบตาและแว่นตานิรภัย
 - พิจารณาจากรูปทรง เลนส์ และลักษณะของแว่น
-- อย่าสรุปว่าแว่นสายตาทั่วไปเป็นแว่นนิรภัยโดยไม่มีหลักฐาน
+
 3. เสื้อช็อป
-- ตรวจสอบเสื้อช็อปวิศวกรรม เสื้อเครื่องแบบช่าง และเสื้อปฏิบัติงาน
+- ตรวจสอบเสื้อช็อปวิศวกรรม เสื้อเครื่องแบบช่าง
+  และเสื้อปฏิบัติงาน
 - พิจารณาจากรูปแบบเสื้อและลักษณะเครื่องแต่งกาย
-- หากไม่สามารถยืนยันได้ว่าเป็นชุดช็อปจริง ให้ระบุว่าไม่สามารถยืนยันได้
+- หากไม่สามารถยืนยันได้ว่าเป็นชุดช็อปจริง
+  ให้ระบุว่าไม่สามารถยืนยันได้
+
 4. สายสะท้อนแสง
 - ตรวจสอบแถบสะท้อนแสงบนเสื้อหรือเครื่องแต่งกาย
 - ไม่จำกัดสี เช่น สีเงิน สีเหลือง หรือสีส้ม
-- สีสดเพียงอย่างเดียวไม่ยืนยันคุณสมบัติสะท้อนแสง
+
 5. หน้ากากอนามัย
 - ตรวจสอบหน้ากากที่สวมปิดจมูกและปาก
 - ตรวจสอบทุกสี เช่น สีขาว ฟ้า เขียว ดำ และสีอื่น ๆ
 
 หลักการสำคัญ:
-- ตรวจสอบจากรูปร่าง ลักษณะ และหน้าที่ของอุปกรณ์ ไม่ใช้สีเป็นเงื่อนไขตัดสินเพียงอย่างเดียว
-- ตรวจสอบทุกรายการที่ผู้ใช้เลือกเท่านั้น หากพบหลายประเภทให้รายงานทุกประเภท
-- ห้ามแต่งข้อมูลหรือคาดเดาว่ามีอุปกรณ์ หากมองไม่เห็นชัดเจน
-- หากภาพไม่ชัดให้ระบุว่าไม่สามารถยืนยันได้
+- ตรวจสอบจากรูปร่าง ลักษณะ และหน้าที่ของอุปกรณ์
+  ไม่ใช้สีเป็นเงื่อนไขตัดสินเพียงอย่างเดียว
+- ตรวจสอบทุกประเภทที่ผู้ใช้เลือก
+- หากพบหลายประเภท ให้รายงานทุกประเภท
+- ห้ามแต่งข้อมูลหรือคาดเดาว่ามีอุปกรณ์
+  หากมองไม่เห็นชัดเจน
+- หากภาพไม่ชัด ให้ระบุว่าไม่สามารถยืนยันได้
 
 กรุณาตอบเป็นภาษาไทยในรูปแบบดังนี้:
+
 ผลการตรวจสอบ PPE
+
 - ชื่ออุปกรณ์: พบ / ไม่พบ / ไม่สามารถยืนยันได้
-  รายละเอียด: อธิบายสี ลักษณะ และสิ่งที่สังเกตเห็น
+- รายละเอียด: อธิบายสี ลักษณะ และสิ่งที่สังเกตเห็น
 
 สรุปผลการตรวจสอบ:
-อธิบายว่าอุปกรณ์ใดพบ ไม่พบ และไม่สามารถยืนยันได้
+อธิบายว่าอุปกรณ์ใดพบและอุปกรณ์ใดไม่พบ
 
-หมายเหตุ: การวิเคราะห์จากภาพเป็นเพียงการประเมินเบื้องต้น ไม่ใช่การรับรองความปลอดภัยในการเข้าห้องปฏิบัติการ และไม่สามารถรับรองมาตรฐานอุปกรณ์จากภาพเพียงอย่างเดียว
-'''
+หมายเหตุ:
+การวิเคราะห์จากภาพเป็นเพียงการประเมินเบื้องต้น
+ไม่ใช่การรับรองความปลอดภัยในการเข้าห้องปฏิบัติการ
+"""
 
-_MODEL_NOT_FOUND = object()
+        for attempt in range(3):
+            try:
+                response = client.models.generate_content(
+                    model=MODEL,
+                    contents=[img, prompt],
+                    config=CONFIG,
+                )
+                return (response.text or "").strip() or "AI ไม่ส่งผลการวิเคราะห์กลับมา กรุณาลองใหม่อีกครั้ง"
 
+            except Exception as e:
+                error = str(e)
 
-def _call_model(client, model, contents):
-    for attempt in range(3):
-        try:
-            response = client.models.generate_content(
-                model=model,
-                contents=contents,
-                config=types.GenerateContentConfig(temperature=0.1),
-            )
-            return (response.text or '').strip() or 'AI ไม่ส่งผลการวิเคราะห์กลับมา กรุณาลองใหม่อีกครั้ง'
-        except Exception as exc:
-            code = getattr(exc, 'code', None)
-            message = str(exc)
-            upper = message.upper()
-            if code is None:
-                for candidate in (400, 401, 403, 404, 429, 500, 502, 503, 504):
-                    if str(candidate) in message:
-                        code = candidate
-                        break
-            if code == 404 or 'NOT_FOUND' in upper:
-                return _MODEL_NOT_FOUND
-            if code in (429, 500, 502, 503, 504) or 'UNAVAILABLE' in upper or 'RESOURCE_EXHAUSTED' in upper:
-                if attempt < 2:
-                    time.sleep(2 * (attempt + 1))
-                    continue
-            if code == 429 or 'RESOURCE_EXHAUSTED' in upper:
-                return 'ใช้งาน API เกินโควตาหรือส่งคำขอถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง'
-            if code in (401, 403) or 'API_KEY_INVALID' in upper or 'PERMISSION_DENIED' in upper:
-                return 'API Key ไม่ถูกต้องหรือไม่มีสิทธิ์ใช้งาน กรุณาตรวจสอบ API Key ใน Google AI Studio'
-            if code == 400 or 'INVALID_ARGUMENT' in upper:
-                return f'คำขอไม่ถูกต้อง (400): {message}'
-            if code in (500, 502, 503, 504) or 'UNAVAILABLE' in upper:
-                return 'เซิร์ฟเวอร์ Gemini ไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่อีกครั้งในภายหลัง'
-            logging.exception('Gemini API error (%s)', model)
-            return f'เกิดข้อผิดพลาดจาก Gemini API ({model}): {message}'
-    return 'ไม่สามารถเชื่อมต่อ Gemini ได้หลังจากลองใหม่หลายครั้ง กรุณาลองใหม่อีกครั้ง'
+                if "503" in error or "UNAVAILABLE" in error:
+                    if attempt < 2:
+                        time.sleep(2)
+                        continue
+
+                if "429" in error or "RESOURCE_EXHAUSTED" in error:
+                    return "ใช้งาน API เกินโควตา กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
+
+                if "404" in error or "NOT_FOUND" in error:
+                    return f"ไม่พบโมเดล {MODEL} สำหรับ API Key นี้ กรุณาตั้งค่า GEMINI_MODEL ใน Render"
+
+                return f"เกิดข้อผิดพลาดในการประมวลผลภาพ: {error}"
+
+    except Exception as e:
+        return f"เกิดข้อผิดพลาด: {str(e)}"
 
 
-def check_object(image, expected_list, api_key):
-    api_key = (api_key or '').strip()
-    if not api_key:
-        return 'กรุณากรอก Gemini API Key ก่อนค่ะ'
-    if image is None:
-        return 'กรุณาอัปโหลดหรือถ่ายภาพก่อนค่ะ'
-    if not expected_list:
-        return 'กรุณาเลือกอุปกรณ์ PPE อย่างน้อย 1 รายการค่ะ'
-    selected = [item for item in PPE_ITEMS if item in expected_list]
-    if not selected:
-        return 'ไม่มีรายการ PPE ที่รองรับ'
-    try:
-        img = image.convert('RGB')
-        img.thumbnail((1600, 1600))
-        contents = [PROMPT.format(items=', '.join(selected)), img]
-        with genai.Client(api_key=api_key) as client:
-            for model in MODELS:
-                result = _call_model(client, model, contents)
-                if result is not _MODEL_NOT_FOUND:
-                    return result
-                logging.warning('Model %s not found for this API key, trying next', model)
-        return ('ไม่พบโมเดลที่ใช้งานได้สำหรับ API Key นี้ (ลองแล้ว: ' + ', '.join(MODELS) + ') '
-                'กรุณาตั้งค่า GEMINI_MODEL ใน Render เป็นชื่อโมเดลที่แสดงใน Google AI Studio')
-    except Exception as exc:
-        logging.exception('Unexpected error')
-        return f'เกิดข้อผิดพลาด: {exc}'
+with gr.Blocks(title="LabSafe AI") as demo:
 
+    gr.Markdown("# 🧪 LabSafe AI")
+    gr.Markdown("ระบบช่วยตรวจสอบ PPE จากภาพอัตโนมัติ")
 
-with gr.Blocks(title='ตรวจสอบ PPE ห้องปฏิบัติการเคมี') as demo:
-    gr.Markdown('# 🧪 ระบบตรวจสอบอุปกรณ์ป้องกันส่วนบุคคล (PPE)\nอัปโหลดหรือถ่ายภาพ แล้วเลือกอุปกรณ์ที่ต้องการตรวจสอบ')
-    with gr.Row():
-        with gr.Column():
-            api_key_input = gr.Textbox(label='Gemini API Key', type='password', placeholder='วาง API Key ที่นี่')
-            image_input = gr.Image(type='pil', label='ภาพผู้ใช้งาน', sources=['upload', 'webcam'])
-            items_input = gr.CheckboxGroup(choices=PPE_ITEMS, value=PPE_ITEMS, label='อุปกรณ์ที่ต้องการตรวจสอบ')
-            submit_btn = gr.Button('ตรวจสอบ', variant='primary')
-        with gr.Column():
-            output = gr.Textbox(label='ผลการตรวจสอบ', lines=20)
-    submit_btn.click(check_object, inputs=[image_input, items_input, api_key_input], outputs=output)
+    api_key_input = gr.Textbox(
+        label="Gemini API Key",
+        type="password",
+        placeholder="วาง API Key ที่นี่"
+    )
 
+    expected = gr.CheckboxGroup(
+        choices=[
+            "ถุงมือ",
+            "แว่นตานิรภัย",
+            "เสื้อช็อป",
+            "สายสะท้อนแสง",
+            "หน้ากากอนามัย"
+        ],
+        value=[
+            "ถุงมือ",
+            "แว่นตานิรภัย",
+            "เสื้อช็อป",
+            "สายสะท้อนแสง",
+            "หน้ากากอนามัย"
+        ],
+        label="เลือกประเภทวัตถุที่ต้องการตรวจสอบ"
+    )
 
-if __name__ == '__main__':
-    port = int(os.getenv('PORT', '7860'))
-    demo.queue().launch(server_name='0.0.0.0', server_port=port)
+    image = gr.Image(
+        type="pil",
+        label="ถ่ายรูปหรืออัปโหลดภาพ",
+        sources=["upload", "webcam"]
+    )
+
+    button = gr.Button(
+        "🔍 ตรวจสอบ PPE",
+        variant="primary"
+    )
+
+    result = gr.Textbox(
+        label="ผลการตรวจสอบ",
+        lines=12
+    )
+
+    button.click(
+        fn=check_object,
+        inputs=[image, expected, api_key_input],
+        outputs=result
+    )
+
+if __name__ == "__main__":
+    # Render ต้องการให้แอปฟังที่ 0.0.0.0 และพอร์ตจากตัวแปร PORT
+    # ไม่ใช้ share=True เพราะบน Render ไม่จำเป็นและทำให้เริ่มระบบช้า/ค้าง
+    demo.queue(default_concurrency_limit=4).launch(
+        server_name="0.0.0.0",
+        server_port=int(os.getenv("PORT", "7860")),
+    )
