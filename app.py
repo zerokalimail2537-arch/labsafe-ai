@@ -5,21 +5,24 @@ from google.genai import types
 import gradio as gr
 from PIL import Image
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3.8-flash").strip() or "gemini-3.8-flash"
+# ลองโมเดลหลักก่อน ถ้าช้าเกินเวลา/ไม่ว่าง จะสลับไปรุ่นที่เบากว่าอัตโนมัติ
+_env_model = os.getenv("GEMINI_MODEL", "").strip()
+MODELS = list(dict.fromkeys(
+    ([_env_model] if _env_model else []) + ["gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-3.5-flash"]
+))
 
 
-def build_config():
-    # ลดเวลา "คิด" ของโมเดล (สาเหตุหลักที่ตอบช้า) และตั้ง timeout ไม่ให้ค้างนาน
-    base = dict(temperature=0.1, http_options=types.HttpOptions(timeout=90_000))
-    try:
-        return types.GenerateContentConfig(
-            thinking_config=types.ThinkingConfig(thinking_level="low"), **base
-        )
-    except Exception:
-        return types.GenerateContentConfig(**base)
-
-
-CONFIG = build_config()
+def make_config(thinking=True):
+    # ให้โมเดลคิดน้อยที่สุด (สาเหตุหลักที่ตอบช้าจนหมดเวลา)
+    if thinking:
+        try:
+            return types.GenerateContentConfig(
+                temperature=0.1,
+                thinking_config=types.ThinkingConfig(thinking_level="minimal"),
+            )
+        except Exception:
+            pass
+    return types.GenerateContentConfig(temperature=0.1)
 
 def check_object(image, expected_list, api_key):
 
@@ -35,7 +38,7 @@ def check_object(image, expected_list, api_key):
     try:
         img = image.convert("RGB")
         # ย่อภาพก่อนส่ง: ภาพจากมือถือมักใหญ่หลาย MB ทำให้อัปโหลดและประมวลผลช้า
-        img.thumbnail((1024, 1024))
+        img.thumbnail((896, 896))
 
         client = genai.Client(api_key=api_key.strip())
 
@@ -99,30 +102,47 @@ def check_object(image, expected_list, api_key):
 ไม่ใช่การรับรองความปลอดภัยในการเข้าห้องปฏิบัติการ
 """
 
-        for attempt in range(3):
-            try:
-                response = client.models.generate_content(
-                    model=MODEL,
-                    contents=[img, prompt],
-                    config=CONFIG,
-                )
-                return (response.text or "").strip() or "AI ไม่ส่งผลการวิเคราะห์กลับมา กรุณาลองใหม่อีกครั้ง"
+        last_error = ""
+        for model in MODELS:
+            use_thinking = True
+            for attempt in range(2):
+                try:
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=[img, prompt],
+                        config=make_config(use_thinking),
+                    )
+                    return (response.text or "").strip() or "AI ไม่ส่งผลการวิเคราะห์กลับมา กรุณาลองใหม่อีกครั้ง"
 
-            except Exception as e:
-                error = str(e)
+                except Exception as e:
+                    error = str(e)
+                    last_error = error
 
-                if "503" in error or "UNAVAILABLE" in error:
-                    if attempt < 2:
-                        time.sleep(2)
+                    # โมเดลบางรุ่นไม่รองรับการตั้งค่า thinking -> ลองใหม่โดยไม่ตั้ง
+                    if "400" in error and "thinking" in error.lower() and use_thinking:
+                        use_thinking = False
                         continue
 
-                if "429" in error or "RESOURCE_EXHAUSTED" in error:
-                    return "ใช้งาน API เกินโควตา กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
+                    if "401" in error or "403" in error or "API_KEY_INVALID" in error or "PERMISSION_DENIED" in error:
+                        return "API Key ไม่ถูกต้องหรือไม่มีสิทธิ์ใช้งาน กรุณาตรวจสอบ API Key ใน Google AI Studio"
 
-                if "404" in error or "NOT_FOUND" in error:
-                    return f"ไม่พบโมเดล {MODEL} สำหรับ API Key นี้ กรุณาตั้งค่า GEMINI_MODEL ใน Render"
+                    if "503" in error or "UNAVAILABLE" in error:
+                        if attempt == 0:
+                            time.sleep(2)
+                            continue
+                        break  # ลองโมเดลถัดไป
 
-                return f"เกิดข้อผิดพลาดในการประมวลผลภาพ: {error}"
+                    if "504" in error or "DEADLINE_EXCEEDED" in error or "404" in error or "NOT_FOUND" in error:
+                        break  # ช้าเกินเวลาหรือไม่พบโมเดล -> ลองโมเดลถัดไปทันที
+
+                    if "429" in error or "RESOURCE_EXHAUSTED" in error:
+                        break  # โควตาโมเดลนี้หมด -> ลองโมเดลถัดไป
+
+                    return f"เกิดข้อผิดพลาดในการประมวลผลภาพ ({model}): {error}"
+
+        if "429" in last_error or "RESOURCE_EXHAUSTED" in last_error:
+            return "ใช้งาน API เกินโควตา กรุณารอสักครู่แล้วลองใหม่อีกครั้ง"
+        return f"ระบบ Gemini ตอบช้าหรือไม่ว่างในขณะนี้ กรุณาลองใหม่อีกครั้งในอีกสักครู่\n(รายละเอียด: {last_error})"
 
     except Exception as e:
         return f"เกิดข้อผิดพลาด: {str(e)}"
