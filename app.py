@@ -94,3 +94,34 @@ def check_object(image, expected_list, api_key):
                     if code == 404 or 'NOT_FOUND' in upper:
                         return f'ไม่พบโมเดล {MODEL} สำหรับ API Key นี้ กรุณาตรวจสอบตัวแปร GEMINI_MODEL ใน Render หรือรายชื่อโมเดลที่รองรับใน Google AI Studio'
                     if code == 429 or 'RESOURCE_EXHAUSTED' in upper:
+                        return 'ใช้งาน API เกินโควตาหรือส่งคำขอถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง'
+                    if code in (401, 403) or 'API_KEY_INVALID' in upper or 'PERMISSION_DENIED' in upper:
+                        return 'API Key ไม่ถูกต้องหรือไม่มีสิทธิ์ใช้งาน กรุณาตรวจสอบ API Key ใน Google AI Studio'
+                    if code == 400 or 'INVALID_ARGUMENT' in upper:
+                        return f'คำขอไม่ถูกต้อง (400): {message}'
+                    if code in (500, 502, 503, 504) or 'UNAVAILABLE' in upper:
+                        return 'เซิร์ฟเวอร์ Gemini ไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่อีกครั้งในภายหลัง'
+                    logging.exception('Gemini API error')
+                    return f'เกิดข้อผิดพลาดจาก Gemini API: {message}'
+        return 'ไม่สามารถเชื่อมต่อ Gemini ได้หลังจากลองใหม่หลายครั้ง กรุณาลองใหม่อีกครั้ง'
+    except Exception as exc:
+        logging.exception('Unexpected error')
+        return f'เกิดข้อผิดพลาด: {exc}'
+
+
+with gr.Blocks(title='ตรวจสอบ PPE ห้องปฏิบัติการเคมี') as demo:
+    gr.Markdown('# 🧪 ระบบตรวจสอบอุปกรณ์ป้องกันส่วนบุคคล (PPE)\nอัปโหลดหรือถ่ายภาพ แล้วเลือกอุปกรณ์ที่ต้องการตรวจสอบ')
+    with gr.Row():
+        with gr.Column():
+            api_key_input = gr.Textbox(label='Gemini API Key', type='password', placeholder='วาง API Key ที่นี่')
+            image_input = gr.Image(type='pil', label='ภาพผู้ใช้งาน', sources=['upload', 'webcam'])
+            items_input = gr.CheckboxGroup(choices=PPE_ITEMS, value=PPE_ITEMS, label='อุปกรณ์ที่ต้องการตรวจสอบ')
+            submit_btn = gr.Button('ตรวจสอบ', variant='primary')
+        with gr.Column():
+            output = gr.Textbox(label='ผลการตรวจสอบ', lines=20)
+    submit_btn.click(check_object, inputs=[image_input, items_input, api_key_input], outputs=output)
+
+
+if __name__ == '__main__':
+    port = int(os.getenv('PORT', '7860'))
+    demo.queue().launch(server_name='0.0.0.0', server_port=port)
