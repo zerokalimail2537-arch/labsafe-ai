@@ -7,8 +7,11 @@ from google.genai import types
 from PIL import Image
 
 logging.basicConfig(level=logging.INFO)
-# ใช้ชื่อโมเดลปัจจุบันเป็นค่าเริ่มต้น; Render Environment GEMINI_MODEL สามารถ override ได้
-MODEL = os.getenv('GEMINI_MODEL', 'gemini-2.5-flash').strip() or 'gemini-2.5-flash'
+# โมเดลที่จะลองตามลำดับ; ถ้าตั้ง GEMINI_MODEL ใน Render จะลองตัวนั้นก่อน
+# หากโมเดลใดไม่พบ (404) สำหรับ API Key นี้ จะลองตัวถัดไปให้อัตโนมัติ
+DEFAULT_MODELS = ['gemini-3.8-flash', 'gemini-3.5-flash', 'gemini-3.5-flash-lite', 'gemini-2.5-flash']
+_env_model = os.getenv('GEMINI_MODEL', '').strip()
+MODELS = list(dict.fromkeys(([_env_model] if _env_model else []) + DEFAULT_MODELS))
 PPE_ITEMS = ['ถุงมือ', 'แว่นตานิรภัย', 'เสื้อช็อป', 'สายสะท้อนแสง', 'หน้ากากอนามัย']
 
 PROMPT = '''คุณเป็น AI ผู้ช่วยตรวจสอบอุปกรณ์ป้องกันส่วนบุคคล (PPE)
@@ -55,6 +58,46 @@ PROMPT = '''คุณเป็น AI ผู้ช่วยตรวจสอบ�
 หมายเหตุ: การวิเคราะห์จากภาพเป็นเพียงการประเมินเบื้องต้น ไม่ใช่การรับรองความปลอดภัยในการเข้าห้องปฏิบัติการ และไม่สามารถรับรองมาตรฐานอุปกรณ์จากภาพเพียงอย่างเดียว
 '''
 
+_MODEL_NOT_FOUND = object()
+
+
+def _call_model(client, model, contents):
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=types.GenerateContentConfig(temperature=0.1),
+            )
+            return (response.text or '').strip() or 'AI ไม่ส่งผลการวิเคราะห์กลับมา กรุณาลองใหม่อีกครั้ง'
+        except Exception as exc:
+            code = getattr(exc, 'code', None)
+            message = str(exc)
+            upper = message.upper()
+            if code is None:
+                for candidate in (400, 401, 403, 404, 429, 500, 502, 503, 504):
+                    if str(candidate) in message:
+                        code = candidate
+                        break
+            if code == 404 or 'NOT_FOUND' in upper:
+                return _MODEL_NOT_FOUND
+            if code in (429, 500, 502, 503, 504) or 'UNAVAILABLE' in upper or 'RESOURCE_EXHAUSTED' in upper:
+                if attempt < 2:
+                    time.sleep(2 * (attempt + 1))
+                    continue
+            if code == 429 or 'RESOURCE_EXHAUSTED' in upper:
+                return 'ใช้งาน API เกินโควตาหรือส่งคำขอถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง'
+            if code in (401, 403) or 'API_KEY_INVALID' in upper or 'PERMISSION_DENIED' in upper:
+                return 'API Key ไม่ถูกต้องหรือไม่มีสิทธิ์ใช้งาน กรุณาตรวจสอบ API Key ใน Google AI Studio'
+            if code == 400 or 'INVALID_ARGUMENT' in upper:
+                return f'คำขอไม่ถูกต้อง (400): {message}'
+            if code in (500, 502, 503, 504) or 'UNAVAILABLE' in upper:
+                return 'เซิร์ฟเวอร์ Gemini ไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่อีกครั้งในภายหลัง'
+            logging.exception('Gemini API error (%s)', model)
+            return f'เกิดข้อผิดพลาดจาก Gemini API ({model}): {message}'
+    return 'ไม่สามารถเชื่อมต่อ Gemini ได้หลังจากลองใหม่หลายครั้ง กรุณาลองใหม่อีกครั้ง'
+
+
 def check_object(image, expected_list, api_key):
     api_key = (api_key or '').strip()
     if not api_key:
@@ -69,41 +112,15 @@ def check_object(image, expected_list, api_key):
     try:
         img = image.convert('RGB')
         img.thumbnail((1600, 1600))
+        contents = [PROMPT.format(items=', '.join(selected)), img]
         with genai.Client(api_key=api_key) as client:
-            for attempt in range(3):
-                try:
-                    response = client.models.generate_content(
-                        model=MODEL,
-                        contents=[PROMPT.format(items=', '.join(selected)), img],
-                        config=types.GenerateContentConfig(temperature=0.1),
-                    )
-                    return (response.text or '').strip() or 'AI ไม่ส่งผลการวิเคราะห์กลับมา กรุณาลองใหม่อีกครั้ง'
-                except Exception as exc:
-                    code = getattr(exc, 'code', None)
-                    message = str(exc)
-                    upper = message.upper()
-                    if code is None:
-                        for candidate in (400, 401, 403, 404, 429, 500, 502, 503, 504):
-                            if str(candidate) in message:
-                                code = candidate
-                                break
-                    if code in (429, 500, 502, 503, 504) or 'UNAVAILABLE' in upper or 'RESOURCE_EXHAUSTED' in upper:
-                        if attempt < 2:
-                            time.sleep(2 * (attempt + 1))
-                            continue
-                    if code == 404 or 'NOT_FOUND' in upper:
-                        return f'ไม่พบโมเดล {MODEL} สำหรับ API Key นี้ กรุณาตรวจสอบตัวแปร GEMINI_MODEL ใน Render หรือรายชื่อโมเดลที่รองรับใน Google AI Studio'
-                    if code == 429 or 'RESOURCE_EXHAUSTED' in upper:
-                        return 'ใช้งาน API เกินโควตาหรือส่งคำขอถี่เกินไป กรุณารอสักครู่แล้วลองใหม่อีกครั้ง'
-                    if code in (401, 403) or 'API_KEY_INVALID' in upper or 'PERMISSION_DENIED' in upper:
-                        return 'API Key ไม่ถูกต้องหรือไม่มีสิทธิ์ใช้งาน กรุณาตรวจสอบ API Key ใน Google AI Studio'
-                    if code == 400 or 'INVALID_ARGUMENT' in upper:
-                        return f'คำขอไม่ถูกต้อง (400): {message}'
-                    if code in (500, 502, 503, 504) or 'UNAVAILABLE' in upper:
-                        return 'เซิร์ฟเวอร์ Gemini ไม่พร้อมใช้งานชั่วคราว กรุณาลองใหม่อีกครั้งในภายหลัง'
-                    logging.exception('Gemini API error')
-                    return f'เกิดข้อผิดพลาดจาก Gemini API: {message}'
-        return 'ไม่สามารถเชื่อมต่อ Gemini ได้หลังจากลองใหม่หลายครั้ง กรุณาลองใหม่อีกครั้ง'
+            for model in MODELS:
+                result = _call_model(client, model, contents)
+                if result is not _MODEL_NOT_FOUND:
+                    return result
+                logging.warning('Model %s not found for this API key, trying next', model)
+        return ('ไม่พบโมเดลที่ใช้งานได้สำหรับ API Key นี้ (ลองแล้ว: ' + ', '.join(MODELS) + ') '
+                'กรุณาตั้งค่า GEMINI_MODEL ใน Render เป็นชื่อโมเดลที่แสดงใน Google AI Studio')
     except Exception as exc:
         logging.exception('Unexpected error')
         return f'เกิดข้อผิดพลาด: {exc}'
