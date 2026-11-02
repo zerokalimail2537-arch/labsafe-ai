@@ -87,7 +87,11 @@ CSS = '''
 #intro {text-align:center; padding:12px 0 4px;}
 #intro h1 {font-size:2.2rem;}
 '''
-with gr.Blocks(title='LabSafe AI | PPE Checker', css=CSS, analytics_enabled=False, delete_cache=(3600, 3600)) as demo:
+with gr.Blocks(
+    title="LabSafe AI | PPE Checker",
+    analytics_enabled=False,
+    delete_cache=(3600, 3600)
+) as demo:
     gr.Markdown('''# 🧪 LabSafe AI\n### ระบบช่วยตรวจสอบอุปกรณ์ป้องกันส่วนบุคคล (PPE) จากภาพด้วย Gemini AI\nเลือกอุปกรณ์ อัปโหลดหรือถ่ายภาพ และใช้ Gemini API Key ของคุณเอง''', elem_id='intro')
     with gr.Row():
         with gr.Column(scale=1):
@@ -97,11 +101,20 @@ with gr.Blocks(title='LabSafe AI | PPE Checker', css=CSS, analytics_enabled=Fals
             button = gr.Button('🔍 ตรวจสอบ PPE', variant='primary')
             clear = gr.Button('ล้างภาพและผลการตรวจสอบ', variant='secondary')
         with gr.Column(scale=1):
-            result = gr.Textbox(label='ผลการตรวจสอบ', lines=20, show_copy_button=True)
+            result = gr.Textbox(
+                label="ผลการตรวจสอบ",
+                lines=20,
+                buttons=["copy"]
+            )
             gr.Markdown('''**หมายเหตุ:** ผลจาก AI เป็นการประเมินเบื้องต้น ไม่ใช่การรับรองความปลอดภัยหรือมาตรฐาน PPE\n\nสร้าง API Key ได้ที่ [Google AI Studio](https://aistudio.google.com/apikey) กรุณาอย่าใช้ Key ของผู้อื่น''')
     button.click(fn=check_object, inputs=[image, expected, api_key_input], outputs=result, api_name=False, show_api=False, concurrency_limit=2)
     clear.click(fn=lambda: (None, ''), inputs=None, outputs=[image, result], api_name=False, show_api=False)
 
 if __name__ == '__main__':
     demo.queue(default_concurrency_limit=2, max_size=20, api_open=False)
-    demo.launch(server_name='0.0.0.0', server_port=int(os.getenv('PORT', '10000')), share=False, show_error=False, enable_monitoring=False)
+    demo.launch(
+    server_name="0.0.0.0",
+    server_port=int(os.environ.get("PORT", 10000)),
+    css=CSS
+)
+
